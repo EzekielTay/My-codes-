@@ -1,0 +1,1474 @@
+;
+; Final project.asm
+; Created: 15/7/2023 11:40:41 pm
+; Author : Ezekiel Tay
+;
+; final version 2.0.asm
+; Created: 17/7/2023 3:49:50 pm
+; Author : Ezekiel Tay
+;
+; final project version 3.0.asm
+; Created: 17/7/2023 11:02:29 pm
+; Author : Ezekiel Tay
+;
+; final project version 4.0.asm
+; Created: 25/7/2023 14:07:25 pm
+; Author : Louie Gu
+;
+; final project version 5.0.asm
+; Created: 31/7/2023 20:15:52 pm
+; Author : Ashleigh Grabow
+;
+.include "m2560def.inc"
+
+;;; LCD Code Setup ;;;
+.equ LCD_RS = 7
+.equ LCD_E = 6
+.equ LCD_RW = 5
+.equ LCD_BE = 4
+
+.equ F_CPU = 16000000	; CPU Freq
+.equ DELAY_1MS = F_CPU / 4 / 1000 - 4	; 1ms = this many clocks - 4 for overhead
+;;; End LCD Code Setup;;;
+
+.equ PORTLDIR = 0xF0
+.equ INITCOLMASK = 0xEF
+.equ INITROWMASK = 0x01
+.equ ROWMASK = 0x0F
+
+.equ floor_number	= 1
+.def temp			= r16
+.def temp_two		= r17
+.def curr_level		= r18
+.def service_level	= r19
+.def direction		= r20
+.def state			= r21
+.def timer_flag		= r22
+.def debounce_flag  = r23
+
+; for Keypad
+.def mask =r5
+.def row =r6
+.def col =r7
+
+; for function
+.def arg_0 = r8
+.def arg_1 = r9
+.def result_one = r10
+
+; for LED Bar
+.def low_level	= r12
+.def high_level = r13
+.def low_count	= r14
+.def high_count = r15
+
+.macro lcd_set
+	sbi PORTA, @0
+.endmacro
+
+.macro lcd_clr
+	cbi PORTA, @0
+.endmacro
+
+.macro do_lcd_command
+	ldi temp, @0
+	rcall lcd_command
+	rcall lcd_wait
+.endmacro
+
+.macro do_lcd_data
+	ldi temp, @0
+	rcall lcd_data
+	rcall lcd_wait
+.endmacro
+
+; The macro clears a word (2 bytes) in a memory
+; the parameter @0 is the memory address for that word
+.macro clear
+	; load the memory address to Y
+	; clear the two bytes at @0 in SRAM
+	ldi YL, low(@0)
+	ldi YH, high(@0)
+	clr temp
+	st Y+, temp
+	st Y, temp
+.endmacro
+
+;Descending counter
+.macro descending
+	lds		r24, @0	; Load the value of the quartersecond counter.
+	lds		r25, @0 + 1
+	SBIW	r25:r24, 1			; Subtract the counter by one. Timer tracker
+	sts		@0, r24
+	sts		@0 + 1, r25
+.endmacro
+
+;compare values macro. Used for timer interrupt.
+.macro compare
+	clc
+	cpi		r24, low(@0)		; Check if (r25:r24) = 7812
+	ldi		temp, high(@0)	; 7812 = 106/128
+	cpc		r25, temp
+.endmacro
+
+.dseg
+.org 0x0200
+emergency_state:
+	.byte 1
+reservice_level_flag:
+	.byte 1
+TempCounter:
+	.byte 2 ; Temporary counter. Used to determine if one second has passed
+quartersecondcounter:
+	.byte 2
+dest_array:
+	.byte 11
+
+.cseg
+.org 0x0000						; Reset vector
+	jmp RESET
+.org INT0addr
+	jmp close_door_interrupt	; right button
+.org INT1addr	
+	jmp open_door_interrupt		; left button
+.org OVF0addr
+	jmp timer_interrupt			; Jump to the interrupt handler for Timer0 overflow.
+
+
+; ####################################################################################################################################
+; ####################################################################################################################################
+; Main code begins
+; ####################################################################################################################################
+; ####################################################################################################################################
+
+RESET: 	
+	ldi		temp, high(RAMEND)
+	out		SPH, temp
+	ldi		temp, low(RAMEND)
+	out		SPL, temp
+
+	ldi		temp, PORTLDIR ; columns are outputs, rows are inputs
+	STS		DDRL, temp     ; cannot use out
+
+	ser		temp		 ; set status register to 0xFF
+	out		DDRC, temp ; set Port C for output operation
+	out		DDRG, temp ; set Port G for output operation
+
+	;;; LCD Initialisation ;;;
+	out DDRF, temp	;	Set LCD data to output
+	out DDRA, temp	;	Set LCD to output
+	clr r16
+	out PORTF, temp ;	Enable LCD data
+	out PORTA, temp ;	Enable LCD
+
+	do_lcd_command 0b00111000 ; function set display (Bit 4 = 8 bit DL; Bit 3 = 2 lines; Bit 2 = 5x7 dot font)
+	rcall sleep_5ms
+	do_lcd_command 0b00111000 ; function set display (Bit 4 = 8 bit DL; Bit 3 = 2 lines; Bit 2 = 5x7 dot font) 
+	rcall sleep_1ms
+	do_lcd_command 0b00111000 ; function set display (Bit 4 = 8 bit DL; Bit 3 = 2 lines; Bit 2 = 5x7 dot font) 
+	do_lcd_command 0b00111000 ; function set display (Bit 4 = 8 bit DL; Bit 3 = 2 lines; Bit 2 = 5x7 dot font) 
+	do_lcd_command 0b00001000 ; display off
+	do_lcd_command 0b00000001 ; clear display
+	do_lcd_command 0b00000110 ; set display to increment position, but no display shift
+	do_lcd_command 0b00001100 ; cursor off, no blink
+
+	sbi DDRE, 3	; enable backlight
+	sbi PORTE, 3
+	;;; End LCD Initialisation ;;;
+
+	clear	TempCounter			; Initialize the temporary counter to 0
+	clear	quartersecondcounter
+	rcall	clear_service_queue_function
+	clr		temp
+	sts		emergency_state,	temp
+
+	clr		timer_flag
+	ldi		curr_level, floor_number	; set starting level as 1
+	ldi		state,	0					; initialise initial state as not moving, no service level
+	ldi		direction, 1				; Default direction is going up
+	rcall	next_service_level_function	; initialise first service level
+	rcall	display_level_function		
+
+	ldi		temp, (1 << ISC10) | (1 << ISC00)	; set INT0 and INT1 as falling
+	sts		EICRA, temp							; edge triggered interrupt
+
+	ldi		temp,	0
+	out		eimsk,	temp
+
+	in		temp, EIMSK			; enable close door. right button
+	ori		temp, (1 << INT0)
+	out		EIMSK, temp
+
+	in		temp, EIMSK			; enable open door. left button
+	ori		temp, (1 << INT1)
+	out		EIMSK, temp
+
+	ldi		temp, 0b00000000
+	out		TCCR0A, temp
+	ldi		temp, 0b00000010	; Prescaling value=8
+	out		TCCR0B, temp		; Prescaling value=8 => 128 microseconds
+	
+	ldi		temp, 1<<TOIE0		
+	sts		TIMSK0, temp		; T/C0 interrupt enable. Overflow interrupt enabled
+
+	;############################################################
+	;Need to enable keybard interrupt here 
+	;############################################################
+	sei							; Enable global interrupt
+	rjmp	main_interrupt_loop
+
+
+;############################################################;############################################################
+;############################################################;############################################################
+; Main program here
+;############################################################;############################################################
+;############################################################;############################################################
+
+main_interrupt_loop:				; Interrupt loops here until there is a change in level
+	rcall	blink_strobe_function
+	rcall	display_lcd
+	rcall	keypad_function
+	cpi		timer_flag,	1			; determine if interrupt flag changed => Change lift level.
+	breq	initialise_change_floor
+	lds		temp,	reservice_level_flag
+	cpi		temp,	1
+	breq	service_level_branch
+	rjmp	main_interrupt_loop
+
+
+	; Subroutine to change level of the elevator
+initialise_change_floor:
+	cp		curr_level,	service_level		
+	breq	service_level_branch		;current floor same as service level jump to service level branch
+	cp		curr_level,	service_level
+	brlo	service_level_is_higher		;current floor less than service level. jump to service_level_is_higher branch
+	rjmp	service_level_is_lower			
+	
+	; Service lower levels (Go down)
+	service_level_is_lower:
+	ldi		direction,	0
+	rjmp	change_floor
+
+	; Service higher levels (Go up)
+	service_level_is_higher:
+	ldi		direction,	1
+	rjmp	change_floor
+
+	; change floor of the lift
+change_floor:
+	mov		arg_0, curr_level
+	mov		arg_1, direction
+	rcall	change_lift_level_function	; Change the lift level
+	mov		curr_level, result_one		
+	rcall	display_level_function		; Display new level
+	cp		curr_level, service_level	; Check it lift has reached the service level 
+	breq	service_level_branch		; if match, go to service_level branch
+	ldi		timer_flag,	0				; Reset timer_flag to 0. (Not-triggered status)
+	rjmp	main_interrupt_loop			; Go back to main to await next level change
+
+
+service_level_branch:
+	; Matching level between current and service level. Prepare & disable relevant interrupts
+	ldi		temp,	0			
+	sts		reservice_level_flag,	temp	;	clr the reservice level flag
+	rcall	pop_array_function		; Remove the first element of the service queue and push forward the rest
+	ldi		state,	2				; Doors opening state. 
+		
+service_level_doors_open:	
+	ldi		temp,	24		
+	sts		quartersecondcounter,	temp	; set quartersecondcounter to 24 = 6s
+	clear	tempcounter
+	ldi		timer_flag,	0			; Reset timer_flag to 0. (Not-triggered status)	
+
+service_level_interrupt_loop:		; Loop here and wait for flag change from interrupt timer.
+	rcall	blink_strobe_function
+	rcall	display_lcd
+	rcall	keypad_function
+	rcall	motor_function
+	cpi		timer_flag,	1			; determine if interrupt flag changed => activate blink
+	breq	activate_blink
+	rjmp	service_level_interrupt_loop
+
+activate_blink:
+	descending	quartersecondcounter		;Decrease quarter second counter
+	rcall	blink_function					;blink
+	lds		temp,	quartersecondcounter
+	cpi		temp,	20	
+	breq	initiate_state_3					
+	cpi		temp,	8
+	breq	initiate_state_4
+	cpi		temp,	0						;Check if 5 seconds has been reached
+	breq	end_service_level
+	rjmp	end_blink_branch
+
+	; Doors fully open state. Servicing current level
+	initiate_state_3:
+	ldi		state, 3
+	rjmp	end_blink_branch
+
+	; Doors closing state. 
+	initiate_state_4:
+	ldi		state, 4
+	rjmp	end_blink_branch
+
+	end_blink_branch:
+	ldi		timer_flag,	0		; Reset timer_flag to 0. (Not-triggered status)
+	rjmp	service_level_interrupt_loop
+
+end_service_level:
+	rcall	display_level_function
+	rcall	next_service_level_function	; Change to next service level
+	ldi		timer_flag,	0				; Reset timer_flag to 0. (Not-triggered status)
+	
+	; turn motor off (0%)
+	ser temp
+	out DDRE, temp							; set PORTE as output
+	
+	ldi temp, 0
+	sts OCR3BL, temp						; OC3B low register
+	clr temp
+	sts OCR3BH, temp						; 0C3B high register
+	ldi temp, (1<<CS30)						; CS30 = 1: no prescaling
+	sts TCCR3B, temp						; set the prescaling value
+	ldi temp, (1<<WGM30)|(1<<COM3B1)		; phase correct PWM, 8 bits
+	sts TCCR3A, temp
+
+	rjmp	main_interrupt_loop			; Go back to main to await next level change
+
+; ####################################################################################################################################
+; ####################################################################################################################################
+; Interrupts are coded below
+; ####################################################################################################################################
+; ####################################################################################################################################
+
+timer_interrupt:
+	push temp	; Prologue starts.
+	push YH
+	push YL
+	push r25
+	push r24
+	
+	; Save all conflict registers in the prologue.
+	; Prologue ends.
+	; Load the value of the temporary counter.
+	cpi		timer_flag,	1
+	breq	end_timer_interrupt	; interrupt flag not reset yet. Ignore all processes and end interrupt
+
+	start_count:
+	lds		r24, tempcounter
+	lds		r25, tempcounter+1
+	adiw	r25: r24, 1			; Increase the temporary counter by one
+
+	cpi		state,	1			; lift travelling state
+	breq	change_level_timer
+	cpi		state,	2			; Doors opening state
+	breq	service_level_timer	
+	cpi		state,	3			; Doors fully open state. 
+	breq	service_level_timer
+	cpi		state,	4			; Doors closing state. 
+	breq	service_level_timer
+
+	rjmp	end_timer_interrupt
+
+	change_level_timer:
+	compare 15624			; check for 1s macro
+	brne	not_time_yet
+	rjmp	time_reach
+
+	service_level_timer:
+	compare 1953			; check for 0.25s macro
+	brne	not_time_yet	; 0.25s not reach. Increment tempcounter
+	rjmp	time_reach
+
+	time_reach:
+	clear	TempCounter	
+	ldi		timer_flag, 1	;Indicate 0.25s is reacheds
+	ldi		debounce_flag, 0
+	rjmp	end_timer_interrupt
+
+	not_time_yet:
+	; Store the new value of the temporary counter.
+	sts		tempcounter, r24
+	sts		tempcounter+1, r25
+	rjmp	end_timer_interrupt
+
+	end_timer_interrupt:	
+	pop		r24			; Epilogue starts;
+	pop		r25			; Restore all conflict registers from the stack.
+	pop		YL
+	pop		YH
+	pop		temp
+	reti				; Return from the interrupt.
+
+; Should only work for state 3 & 4 (fully open or doors closing)
+open_door_interrupt:
+	push	temp
+	in		temp, SREG				; save SREG
+	push	temp
+
+	; Check for door fully open and closing states
+	cpi		debounce_flag, 1		; check if button has already been pressed
+	breq	end_open_door_interrupt
+	cpi		state,	0
+	breq	reopen_door
+	cpi		state,	3				
+	brlt	end_open_door_interrupt	; lift travelling, ignore
+	cpi		state,	5				
+	brsh	end_open_door_interrupt	; >= 5
+
+	ldi		temp,	24
+	sts		quartersecondcounter, temp
+	ldi		state,	2
+	ldi		debounce_flag, 1
+	rjmp	end_open_door_interrupt
+
+	; Open the door again with the door open button after level has been serviced
+	reopen_door:					
+	mov		service_level,	curr_level
+	ldi		temp,	1
+	sts		reservice_level_flag,	temp	;	set the reservice level flag
+	ldi		debounce_flag, 1
+	rjmp	end_open_door_interrupt
+
+	end_open_door_interrupt:
+	pop		temp
+	out		SREG, temp
+	pop		temp
+	reti
+
+; Should only work for state 3 (doors fully open)
+close_door_interrupt:					
+	push	temp
+	in		temp, SREG					; save SREG
+	push	temp
+
+	cpi		state,	3					; not current at door fully open state, end interrupt
+	brne	end_open_door_interrupt
+	cpi		debounce_flag, 1			; check if button has already been pressed
+	breq	end_open_door_interrupt	
+
+	ldi		temp,	8
+	sts		quartersecondcounter, temp	; Set count to have 2s remaining to service level
+	ldi		state,	4					; Set to closing doors state
+	ldi		debounce_flag, 1
+
+	end_close_door_interrupt:
+	pop		temp
+	out		SREG, temp
+	pop		temp
+	reti
+
+; ####################################################################################################################################
+; ####################################################################################################################################
+; Beginning of Subroutines & functions. End of Interrupts
+; ####################################################################################################################################
+; ####################################################################################################################################
+
+; Display the LED of the current floor
+display_level_function:
+	push	low_level	
+	push	low_count
+	push	high_level
+	push	high_count
+	push	temp
+
+	clr		low_level
+	clr		high_level
+	clr		high_count
+	mov		low_count, curr_level   ; load curr_level into low_level
+	mov		temp, low_count
+	cpi		temp, 8					; Compare floor number with lvl 8
+	brsh	above_level_eight		; Floor number > 8
+	rjmp	end_display_level_function
+
+above_level_eight:
+	subi	temp, 8
+	mov		high_count, temp	;Determine levels above lvl 8
+	ldi		temp, 8
+	mov		low_count, temp
+
+end_display_level_function:
+	mov		arg_0, low_count			; preparing arguments for function
+	rcall	determine_level_function	; Determine number of LEDs from port C to light up
+	mov		low_level, result_one
+
+	mov		arg_0, high_count			; preparing arguments for function
+	rcall	determine_level_function	; Determine number of LEDs from port G to light up
+	mov		high_level, result_one
+
+	out		PORTC, low_level	; write low_level to Port C
+	out		PORTG, high_level	; write high_level to Port G
+
+	pop		temp
+	pop		high_count
+	pop		high_level
+	pop		low_count
+	pop		low_level
+	ret
+
+; ###########################################################################################
+; Function to return LED bits to correspond to the level.
+; arg_0 is counter
+determine_level_function:	;prologue
+	push	temp		
+	push	temp_two
+	push	r18
+	clr		r18
+
+loop:
+	ldi		temp, 1
+	mov		temp_two, arg_0
+	cpi		temp_two, 0
+	breq	end_determine_level_function	; end function when counter is zero
+	lsl		r18								; Shift bits to left to make space for lsb
+	add		r18, temp						; Add 1 to the level
+	dec		arg_0							; decrement counter
+	rjmp	loop
+
+end_determine_level_function:	; epilogue
+	mov		result_one, r18
+	pop		r18
+	pop		temp_two
+	pop		temp
+	ret 
+
+
+; ###########################################################################################
+; Increase or decrease lift level depending on direction given.
+; arg_0: current level
+; arg_1: current lift direction
+change_lift_level_function:
+	push	temp
+	mov		temp, arg_1
+	cpi		temp, 1					; If lift direction is up, increase curr_level
+	breq	increase_lift_level		; else, decrease curr_level
+	dec		arg_0
+	rjmp	end_change_lift_level_function
+
+increase_lift_level:
+	inc		arg_0
+
+end_change_lift_level_function:
+	mov		result_one,	arg_0		; new curr_level returned as result_one
+	pop		temp
+	ret
+
+; ############################################################################################
+; Function to determine next service level. Match it with current level to service the level.
+next_service_level_function:
+	push	temp
+	push	zl
+	push	zh
+
+	ldi		ZL,		low(dest_array)		; go to address in program memory where array is stored
+	ldi		ZH,		high(dest_array)	; go to address in program memory where array is stored
+	ld		service_level,	Z			; Load number from program memory into r17
+
+	cpi		service_level,	0
+	brne	service_level_change_state
+	
+	ldi		state,	0					; next service level non-existent. lift does not move
+	rjmp	end_service_level_function
+
+service_level_change_state:
+	ldi		state,	1					; next service level exists. lift prepped to travel betweeen floors
+	rjmp	end_service_level_function
+
+end_service_level_function:
+	pop		zh
+	pop		zl
+	pop		temp
+	ret
+
+; ############################################################################################
+; blink function
+; Somehow need to alternate between display level & display nothing
+blink_function:
+	push	temp
+	in		temp,	portc	;load output of portC into r16
+	cpi		temp,	0
+
+	brne	blink_branch_2
+	rcall	display_level_function	;change to display curr_level.
+	rjmp	end_blink_function
+
+blink_branch_2:	
+	ldi		temp,	0		;change to display nothing
+	out		portc,	temp
+	out		portg,	temp
+	
+end_blink_function:	
+	pop		temp
+	ret
+
+; ############################################################################################
+; Insert request function to insert service level to queue in order.
+; arg_0 => level to insert
+; arg_1 => 1 or 2 depending if level to insert is higher or lower than current level.
+insert_request_function:
+	push	temp
+	push	temp_two
+	push	xl
+	push	xh
+	push	yl
+	push	yh
+	push	arg_0
+	push	arg_1
+
+	lds		temp,	emergency_state			
+	cpi		temp,	1
+	breq	end_insert_request_function	; If in state of emergency, do not insert any new service levels
+
+	ldi		XL, low(dest_array)			; Load address of the destination to store array into X
+    ldi		XH, high(dest_array)
+
+check_duplicate_loop:
+	ld		temp,	X+
+	cp		arg_0,	temp				; Check if insert value already exist in array. If so, end function
+	breq	end_insert_request_function	
+	cpi		temp,	0
+	breq	reinitialise_array	
+	rjmp	check_duplicate_loop
+
+reinitialise_array:
+	ldi		XL, low(dest_array)			; Load address of the destination to store array into X
+    ldi		XH, high(dest_array)
+
+insert_request_loop:
+	movw	YL,	XL						; Copy addres of X into Y
+	ld		temp,	X+
+	
+	cpi		temp,	0					; Check if current element is 0. If so, Insert the last element
+	breq	insert_last_element
+	mov		temp_two,	arg_1
+	cpi		temp_two,	1				; Check for case 1
+	breq	insert_case_1
+	cpi		temp_two,	2				; Check for case 2
+	breq	insert_case_2
+
+interchange:
+	mov		temp_two,	arg_0
+	st		Y,	temp_two		; Store the insert value into the address value in Y
+	mov		arg_0,	temp		; Replace the insert value with curr
+
+	ldi		temp,	0
+	mov		arg_1,	temp		; set to case 0. Normal interchange.
+	rjmp	insert_request_loop
+
+insert_case_2:				; case 2, Insert level higher than current level
+	cp		arg_0,	temp	; Need to insert at point where insert < current element
+	brlo	interchange	
+	rjmp	insert_request_loop
+
+insert_case_1:				; case 1, Insert level lower than current level
+	cp		arg_0,	temp	; Need to insert at point where insert > current element
+	brsh	interchange
+	rjmp	insert_request_loop
+
+insert_last_element:		; Insert last element at the end of array
+	mov		temp,	arg_0
+	st		y,	temp
+	cpi		state,	0
+	breq	update_service_level	; Update next service level if the lift is state 0
+	cpi		state,	1
+	breq	update_service_level	; Update next service level if the lift is state 0
+	rjmp	end_insert_request_function
+
+update_service_level:
+	rcall	next_service_level_function	; Update next service level
+
+end_insert_request_function:
+	pop		arg_1
+	pop		arg_0
+	pop		yh
+	pop		yl
+	pop		xh
+	pop		xl
+	pop		temp_two
+	pop		temp
+	ret
+
+; ############################################################################################
+; Determine the case to insert the new request level. Called just before insert_request_function.
+; Sets the arg_1 for insert_request_function
+; arg_0 is the new service level to compare
+insert_case_function:
+	push	temp
+	cp		arg_0, curr_level
+	breq	case_0
+	brlo	case_1			; Case 1 when service level is lower than current level, insert when insert > current element
+	rjmp	case_2			; Case 2 when service level is higher than current level, insert when insert < current element
+
+case_0:
+	cpi		state,	1
+	breq	special_case_lift
+	clr		arg_1
+	rjmp	end_insert_case_function
+
+special_case_lift:		
+	cpi		direction,	1
+	brne	case_2			 
+	rjmp	case_1			
+
+case_1:					;	Insert position where insert_level > element
+	ldi		temp,	1
+	mov		arg_1,	temp
+	rjmp	end_insert_case_function
+
+case_2:					;	Insert position where insert_level > element
+	ldi		temp,	2
+	mov		arg_1,	temp
+	rjmp	end_insert_case_function
+
+end_insert_case_function:
+	pop		temp
+	ret
+
+; ############################################################################################
+; pop array function
+; pop the first element from the array and shift forawrd all remaining elements
+pop_array_function:
+	push	xl
+	push	xh
+	push	yl
+	push	yh
+
+	ldi		XL, low(dest_array)			; Load address of the destination to store array into X
+    ldi		XH, high(dest_array)
+	ldi		YL, low(dest_array)			; Load address of the destination to store array into X
+    ldi		YH, high(dest_array)
+	adiw	Y, 1
+
+pop_loop:
+	ld		temp,	Y+
+	st		X+,		temp
+	cpi		temp,	0
+	breq	endpop_array_function
+	rjmp	pop_loop
+
+endpop_array_function:
+	pop		yh
+	pop		yl
+	pop		xh
+	pop		xl
+	ret
+
+; ############################################################################################
+; Code for keypad control
+keypad_function:
+	push	temp
+	push	temp_two
+
+	ldi		temp,	INITCOLMASK ; initial column mask
+	mov		mask,	temp
+	clr		col ; initial column
+
+colloop:
+	STS		PORTL, mask ; set column to mask value
+	; (sets column 0 off)
+	ldi		temp, 0xFF ; implement a delay so the
+	; hardware can stabilize
+	
+delay:
+	dec		temp
+	brne	delay
+	LDS		temp, PINL				; read PORTL. Cannot use in 
+	andi	temp, ROWMASK			; read only the row bits
+	cpi		temp, 0xF				; check if any rows are grounded
+	breq	nextcol					; if not go to the next column
+	ldi		temp_two,	INITROWMASK ; initial column mask
+	mov		mask,	temp_two
+	clr		row						; initial row
+	
+rowloop:      
+	mov		temp_two, temp
+	and		temp_two, mask		; check masked bit
+	brne	skipconv			; if the result is non-zero,
+	; we need to look again
+	rcall	convert_function				; if bit is clear, convert the bitcode
+	rjmp	end_keypad_function				 ; and start again
+	
+skipconv:
+	inc		row			; else move to the next row
+	lsl		mask		; shift the mask to the next bit
+	jmp		rowloop          
+
+nextcol:   
+	mov		temp,	col  
+	cpi		temp,	3		; check if we are on the last column
+	breq	end_keypad_function			; if so, no buttons were pushed,
+	; so start again.
+	; else shift the column mask:
+	sec						; We must set the carry bit
+	rol		mask			; and then rotate left by a bit,
+	; shifting the carry into
+	; bit zero. We need this to make
+	; sure all the rows have
+	; pull-up resistors
+	inc		col				; increment column value
+	jmp		colloop			; and check the next column
+	; convert function converts the row and column given to a
+	; binary number and also outputs the value to PORTC.
+	; Inputs come from registers row and col and output is in
+	; temp.
+end_keypad_function:
+	pop		temp_two
+	pop		temp
+	ret
+
+; ############################################################################################
+; Code for converting keypad input to a service level
+convert_function:
+	push	temp
+	push	temp_two
+
+	mov		temp_two,	col 
+	cpi		temp_two,	3	; if column is 3 we have a letter
+	breq	letters
+	mov		temp,	row
+	cpi		temp,	3		; if row is 3 we have a symbol or 0
+	breq	symbols
+	mov		temp,	row		; otherwise we have a number (1-9)
+	lsl		temp			; temp = row * 2
+	add		temp,	row		; temp = row * 3
+	add		temp,	col		; add the column address
+	; to get the offset from 1
+	inc		temp			; add 1. Value of switch is
+	; row*3 + col + 1.
+	jmp		convert_to_service_level
+	
+letters:
+	jmp		end_convert_function	; Ignore all letters
+	
+symbols:
+	mov		temp,	col
+	cpi		temp,	0				; check if we have a star
+	breq	star
+	cpi		temp,	1				; or if we have zero
+	breq	zero
+	jmp		end_convert_function	; Ignore hash
+	
+star:					
+	rcall	emergency_function	; Set emergency if star is pressed
+	rjmp	end_convert_function	
+
+zero:
+	ldi		temp, 10				; set to level 10
+	
+convert_to_service_level:
+	lds		temp_two,	emergency_state
+	cpi		temp_two,	1
+	breq	end_convert_function		; If emergency, ignore all keypad instructions other than '*'
+	cpi		temp,	0					; insert level == 0 is ignored
+	breq	end_convert_function
+	cpi		temp,	11					; insert_level >= 11 are ignored
+	brsh	end_convert_function	
+	cp		temp,	curr_level
+	breq	reset_service_timer_branch
+
+insert_to_service_queue:
+	mov		arg_0,	temp
+	rcall	insert_case_function		; Determine case for insert_request_function
+	rcall	insert_request_function		; insert level to service queue
+	rcall	display_lcd
+	clr		temp
+	rjmp	end_convert_function
+
+reset_service_timer_branch:				; If number pressed corressponds to current_level, service the level
+	cpi		state,	2						
+	brlo	insert_to_service_queue
+	ldi		temp,	24
+	sts		quartersecondcounter, temp
+	ldi		state,	2
+	ldi		debounce_flag, 1
+	rjmp	end_convert_function
+
+end_convert_function:
+	pop		temp_two
+	pop		temp
+	ret ; return to caller
+
+; ###########################################################################
+; clear 11 bytes of space in the destination array.
+; 11 bytes used since pop array function requires the 11th byte to be reserved as zero at all times.
+clear_service_queue_function:
+	push	xl
+	push	xh
+	push	temp
+	push	temp_two
+
+	ldi		XL, low(dest_array)			; Load address of the destination to store array into X
+    ldi		XH, high(dest_array)
+	ldi		temp_two,	11				
+
+store_loop:
+    ldi		temp, 0						; Load from program memory zeros
+    st		X+, temp					; Store into Data memory. (clearing the space)
+    dec		temp_two					; Decrease counter
+    brne	store_loop
+
+end_service_queue_function:
+	pop		temp_two
+	pop		temp
+	pop		xh
+	pop		xl
+	ret
+
+; ###########################################################################
+; activate or deactivate emergency here
+emergency_function:
+	push	temp
+	rcall	clear_service_queue_function	; clear service queue
+	lds		temp,	emergency_state			
+	cpi		temp,	1
+	breq	disable_emergency				; If emergency state was activated, deactivate it
+	
+	ldi		temp,	1					
+	mov		arg_0,	temp					; prep level 1 to be inserted to front of service queue
+	clr		temp
+	mov		arg_1,	temp					
+	rcall	insert_request_function			; Set level 1 as next service level
+
+	ldi		temp,	1						; initiate emergency protocol after pushing level 1 to service_queue
+	sts		emergency_state, temp			; since the function freezes once emergency state is initiated
+	do_lcd_command 0b00000001				; clear display
+
+	cpi		state,	2						
+	breq	emergency_close_doors
+	cpi		state,	3
+	breq	emergency_close_doors
+	cpi		state,	4
+	breq	emergency_close_doors
+	rjmp	end_emergency_function
+
+	emergency_close_doors:				; If lift is current servicing a level, close the doors and descend to level 1
+	ldi		temp,	8					; set timer to 2s to close doors
+	sts		quartersecondcounter, temp
+	ldi		timer_flag,	0
+	rcall	next_service_level_function
+	ldi		state,	4					; Set state to doors closing here, since its reset in the next_service_level_function
+	rjmp	end_emergency_function
+
+	disable_emergency:
+	cbi		PORTA,	1					; Strobe light turn off 
+	ldi		temp,	0
+	sts		emergency_state,	temp	; disable emergency protocol 
+	ldi		state,	0					; Set lift to initial state
+	ldi		service_level,	0			
+	rcall	display_level_function
+	rjmp	end_emergency_function
+
+	end_emergency_function:
+	pop		temp
+	ret
+
+; #################################################################################################
+;Blink strobe light functions several times a second
+blink_strobe_function:
+	push	temp
+	push	temp_two
+
+	lds		temp,	emergency_state			
+	cpi		temp,	1
+	brne	end_blink_strobe_function		; If Lift is not in an emergency state, ignore the strobe light
+
+	in		temp,	PORTA			
+	lsr		temp							; Move bit 1 to position of bit 0. (Bit 1 controls the strobe)
+	ldi		temp_two,	1					
+	and		temp,	temp_two				
+	cpi		temp,	1						
+	brne	turn_on_strobe					; If Strobe is off, turn it on
+	cbi		PORTA,	1						; else, turn it off
+	rjmp	end_blink_strobe_function
+
+turn_on_strobe:
+	sbi		PORTA,	1						; Turn on Strobe light
+	rjmp	end_blink_strobe_function
+
+end_blink_strobe_function:
+	pop		temp_two
+	pop		temp
+	ret
+
+; #################################################################################################
+display_lcd:
+	push temp
+	push temp_two
+	push service_level
+
+	lds temp, emergency_state
+	cpi temp, 1
+	brne first_row
+	rjmp display_emergency
+
+first_row:
+	do_lcd_command 0b10000000
+
+	do_lcd_data 'C'
+	do_lcd_data 'u'
+	do_lcd_data 'r'
+	do_lcd_data 'r'
+	do_lcd_data 'e'
+	do_lcd_data 'n'
+	do_lcd_data 't'
+	do_lcd_data ' '
+	do_lcd_data 'f'
+	do_lcd_data 'l'
+	do_lcd_data 'o'
+	do_lcd_data 'o'
+	do_lcd_data 'r'
+	do_lcd_data ' '
+
+	mov temp, curr_level
+	cpi curr_level, 10
+	brne second_row
+	do_lcd_data '1'
+	do_lcd_data '0'
+	
+second_row:
+	ldi temp_two, 0b00110000 ; ascii for '0'
+	add temp, temp_two ; Convert the digit to ASCII character
+	rcall lcd_data
+	rcall lcd_wait ; Display the ones digit on the LCD
+	do_lcd_data ' '
+
+	do_lcd_command 0b11000000 ; Move to the second line of the LCD
+
+	do_lcd_data 'N'
+	do_lcd_data 'e'
+	do_lcd_data 'x'
+	do_lcd_data 't'
+	do_lcd_data ' '
+	do_lcd_data 's'
+	do_lcd_data 't'
+	do_lcd_data 'o'
+	do_lcd_data 'p'
+	do_lcd_data ' '
+
+	mov temp, service_level
+	cpi service_level, 10
+	breq display_10
+
+	ldi temp_two, 0b00110000 ; ascii for '0'
+	add temp, temp_two ; Convert the digit to ASCII character
+	rcall lcd_data
+	rcall lcd_wait ; Display the ones digit on the LCD
+	do_lcd_data ' '
+	rjmp end_display_lcd
+
+display_10:
+	do_lcd_data '1'
+	do_lcd_data '0'
+
+end_display_lcd:
+	rcall indicate_direction
+	pop service_level
+	pop temp_two
+	pop temp
+	ret
+
+display_emergency:
+	
+	do_lcd_command 0b10000000
+
+	do_lcd_data 'E'	; first line
+	do_lcd_data 'm'
+	do_lcd_data 'e'
+	do_lcd_data 'r'
+	do_lcd_data 'g'
+	do_lcd_data 'e'
+	do_lcd_data 'n'
+	do_lcd_data 'c'
+	do_lcd_data 'y'
+
+	do_lcd_command 0b11000000 ; next line (bit 7 = set DD RAM; bit 6 = row 1; bit 5-0 = column 0)
+
+	do_lcd_data 'C'
+	do_lcd_data 'a'
+	do_lcd_data 'l'
+	do_lcd_data 'l'
+	do_lcd_data ' '
+	do_lcd_data '0'
+	do_lcd_data '0'
+	do_lcd_data '0'
+
+	rjmp end_display_lcd
+
+indicate_direction:
+	push	temp
+	push	zl
+	push	zh
+
+	lds temp, emergency_state
+	cpi temp, 1
+	breq end_indicate_direction
+
+	do_lcd_data ' '
+
+	cpi		service_level, 0
+	breq	indicate_nothing
+
+	cp		service_level, curr_level
+	breq	check_next
+	brlt	indicate_down
+	rjmp	indicate_up
+	
+check_next:
+	ldi		ZL,		low(dest_array)		; go to address in program memory where array is stored
+	ldi		ZH,		high(dest_array)	; go to address in program memory where array is stored
+	ld		temp,	Z			; Load number from program memory into r17
+
+	cpi		temp,	0
+	breq	indicate_nothing		; no levels requested
+
+	cp		temp, curr_level
+	breq	indicate_nothing
+	brlt	indicate_down
+	rjmp	indicate_up
+
+indicate_nothing:
+	do_lcd_data ' '
+	rjmp end_indicate_direction
+
+indicate_up:
+	do_lcd_data '^'
+	rjmp end_indicate_direction
+
+indicate_down:
+	do_lcd_data 'v'
+
+end_indicate_direction:
+	pop zh
+	pop zl
+	pop temp
+	ret
+
+;######################################################################
+
+lcd_command:
+	push temp
+	out PORTF, temp
+	rcall sleep_1ms
+	lcd_set LCD_E
+	rcall sleep_1ms
+	lcd_clr LCD_E
+	rcall sleep_1ms
+	pop temp
+	ret
+
+lcd_data:
+	push temp
+	out PORTF, temp
+	lcd_set LCD_RS
+	rcall sleep_1ms
+	lcd_set LCD_E
+	rcall sleep_1ms
+	lcd_clr LCD_E
+	rcall sleep_1ms
+	lcd_clr LCD_RS
+	pop temp
+	ret
+
+lcd_wait:
+	push temp
+	clr temp
+	out DDRF, temp
+	out PORTF, temp
+	lcd_set LCD_RW
+
+lcd_wait_loop:
+	rcall sleep_1ms
+	lcd_set LCD_E
+	rcall sleep_1ms
+	in temp, PINF
+	lcd_clr LCD_E
+	sbrc temp, 7
+	rjmp lcd_wait_loop
+
+	lcd_clr LCD_RW
+	ser temp
+	out DDRF, temp
+	pop temp
+	ret
+
+sleep_1ms:
+	push r24
+	push r25
+	ldi r25, high(DELAY_1MS)
+	ldi r24, low(DELAY_1MS)
+
+delayloop_1ms:
+	sbiw r25:r24, 1
+	brne delayloop_1ms
+	pop r25
+	pop r24
+	ret
+
+sleep_5ms:
+	rcall sleep_1ms
+	rcall sleep_1ms
+	rcall sleep_1ms
+	rcall sleep_1ms
+	rcall sleep_1ms
+	ret
+;;; End LCD Functions ;;;
+
+; ###########################################################################
+; activate or deactivate motor here
+
+motor_function:
+	push temp
+
+check_opening_state:
+	cpi state, 2							; if not opening state, branch
+	breq motor_opening
+
+check_closing_state:
+	cpi state, 4							; if not opening state, branch
+	breq motor_closing
+	rjmp deactivate_motor
+	
+motor_opening:
+
+	; turn motor on (60%)
+	ser temp
+	out DDRE, temp							; set PORTE as output
+	
+	ldi temp, 153
+	sts OCR3BL, temp						; OC3B low register
+	clr temp
+	sts OCR3BH, temp						; 0C3B high register
+	
+	ldi temp, (1<<CS30)						; CS30 = 1: no prescaling
+	sts TCCR3B, temp						; set the prescaling value
+	ldi temp, (1<<WGM30)|(1<<COM3B1)
+	sts TCCR3A, temp
+	
+	rjmp end_motor_function				
+
+motor_closing:
+	; turn motor on (30%)
+	ser temp
+	out DDRE, temp							; set PORTE as output
+	
+	ldi temp, 76
+	sts OCR3BL, temp						; OC3B low register
+	clr temp
+	sts OCR3BH, temp						; 0C3B high register
+	
+	ldi temp, (1<<CS30)						; CS30 = 1: no prescaling
+	sts TCCR3B, temp						; set the prescaling value
+	ldi temp, (1<<WGM30)|(1<<COM3B1)
+	sts TCCR3A, temp
+
+	rjmp end_motor_function
+
+deactivate_motor:
+	; turn motor off (0%)
+	ser temp
+	out DDRE, temp							; set PORTE as output
+	
+	ldi temp, 0
+	sts OCR3BL, temp						; OC3B low register
+	clr temp
+	sts OCR3BH, temp						; 0C3B high register
+	ldi temp, (1<<CS30)						; CS30 = 1: no prescaling
+	sts TCCR3B, temp						; set the prescaling value
+	ldi temp, (1<<WGM30)|(1<<COM3B1)		; phase correct PWM, 8 bits
+	sts TCCR3A, temp
+
+	rjmp end_motor_function
+
+end_motor_function:
+	pop temp
+	ret
+
+
+; ##########################################################################################################
+; ##########################################################################################################
+; Alternate emergency functions
+; ##########################################################################################################
+; ##########################################################################################################
+; Code for converting keypad input to a service level
+/*convert_function:
+	push	temp
+	push	temp_two
+
+	mov		temp_two,	col 
+	cpi		temp_two,	3	; if column is 3 we have a letter
+	breq	letters
+	mov		temp,	row
+	cpi		temp,	3		; if row is 3 we have a symbol or 0
+	breq	symbols
+	mov		temp,	row		; otherwise we have a number (1-9)
+	lsl		temp			; temp = row * 2
+	add		temp,	row		; temp = row * 3
+	add		temp,	col		; add the column address
+	; to get the offset from 1
+	inc		temp			; add 1. Value of switch is
+	; row*3 + col + 1.
+	jmp		convert_to_service_level
+	
+letters:
+	jmp		end_convert_function	; Ignore all letters
+	
+symbols:
+	mov		temp,	col
+	cpi		temp,	0				; check if we have a star
+	breq	star
+	cpi		temp,	1				; or if we have zero
+	breq	zero
+	jmp		end_convert_function	; Ignore hash
+	
+star:					
+	rcall	emergency_function	; Set emergency if star is pressed
+	rjmp	end_convert_function	
+
+zero:
+	ldi		temp, 10				; set to level 10
+	
+convert_to_service_level:
+	cpi		temp,	0					; insert level == 0 is ignored
+	breq	end_convert_function
+	cpi		temp,	11					; insert_level >= 11 are ignored
+	brsh	end_convert_function	
+	cp		temp,	curr_level
+	breq	reset_service_timer_branch
+
+insert_to_service_queue:
+	mov		arg_0,	temp
+	rcall	insert_case_function		; Determine case for insert_request_function
+	rcall	insert_request_function		; insert level to service queue
+	rcall	display_lcd
+	clr		temp
+	rjmp	end_convert_function
+
+reset_service_timer_branch:				; If number pressed corressponds to current_level, service the level
+	cpi		state,	2						
+	brlo	insert_to_service_queue
+	ldi		temp,	24
+	sts		quartersecondcounter, temp
+	ldi		state,	2
+	ldi		debounce_flag, 1
+	rjmp	end_convert_function
+
+end_convert_function:
+	pop		temp_two
+	pop		temp
+	ret ; return to caller
+
+
+
+; ###########################################################################
+; activate or deactivate emergency here
+emergency_function:
+	push	temp
+	lds		temp,	emergency_state			
+	cpi		temp,	1
+	breq	disable_emergency				; If emergency state was activated, deactivate it
+	
+	ldi		temp,	1						; initiate emergency protocol after pushing level 1 to service_queue
+	sts		emergency_state, temp			; since the function freezes once emergency state is initiated
+	do_lcd_command 0b00000001				; clear display
+	rjmp	end_emergency_function
+
+	disable_emergency:
+	cbi		PORTA,	1					; Strobe light turn off 
+	ldi		temp,	0
+	sts		emergency_state,	temp	; disable emergency protocol 
+	ldi		state,	0					; Set lift to initial state
+	ldi		service_level,	0			
+	rcall	display_level_function
+	rjmp	end_emergency_function
+
+	end_emergency_function:
+	pop		temp
+	ret
+
+; ############################################################################################
+; Insert request function to insert service level to queue in order.
+; arg_0 => level to insert
+; arg_1 => 1 or 2 depending if level to insert is higher or lower than current level.
+insert_request_function:
+	push	temp
+	push	temp_two
+	push	xl
+	push	xh
+	push	yl
+	push	yh
+	push	arg_0
+	push	arg_1
+
+	ldi		XL, low(dest_array)			; Load address of the destination to store array into X
+    ldi		XH, high(dest_array)
+
+check_duplicate_loop:
+	ld		temp,	X+
+	cp		arg_0,	temp				; Check if insert value already exist in array. If so, end function
+	breq	end_insert_request_function	
+	cpi		temp,	0
+	breq	reinitialise_array	
+	rjmp	check_duplicate_loop
+
+reinitialise_array:
+	ldi		XL, low(dest_array)			; Load address of the destination to store array into X
+    ldi		XH, high(dest_array)
+
+insert_request_loop:
+	movw	YL,	XL						; Copy addres of X into Y
+	ld		temp,	X+
+	
+	cpi		temp,	0					; Check if current element is 0. If so, Insert the last element
+	breq	insert_last_element
+	mov		temp_two,	arg_1
+	cpi		temp_two,	1				; Check for case 1
+	breq	insert_case_1
+	cpi		temp_two,	2				; Check for case 2
+	breq	insert_case_2
+
+interchange:
+	mov		temp_two,	arg_0
+	st		Y,	temp_two		; Store the insert value into the address value in Y
+	mov		arg_0,	temp		; Replace the insert value with curr
+
+	ldi		temp,	0
+	mov		arg_1,	temp		; set to case 0. Normal interchange.
+	rjmp	insert_request_loop
+
+insert_case_2:				; case 2, Insert level higher than current level
+	cp		arg_0,	temp	; Need to insert at point where insert < current element
+	brlo	interchange	
+	rjmp	insert_request_loop
+
+insert_case_1:				; case 1, Insert level lower than current level
+	cp		arg_0,	temp	; Need to insert at point where insert > current element
+	brsh	interchange
+	rjmp	insert_request_loop
+
+insert_last_element:		; Insert last element at the end of array
+	mov		temp,	arg_0
+	st		y,	temp
+	cpi		state,	0
+	breq	update_service_level	; Update next service level if the lift is state 0
+	cpi		state,	1
+	breq	update_service_level	; Update next service level if the lift is state 0
+	rjmp	end_insert_request_function
+
+update_service_level:
+	rcall	next_service_level_function	; Update next service level
+
+end_insert_request_function:
+	pop		arg_1
+	pop		arg_0
+	pop		yh
+	pop		yl
+	pop		xh
+	pop		xl
+	pop		temp_two
+	pop		temp
+	ret*/
+; ##########################################################################################################
+; ##########################################################################################################
+; End Alternate emergency functions
+; ##########################################################################################################
+; ##########################################################################################################
