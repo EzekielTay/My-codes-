@@ -1,0 +1,163 @@
+#! /usr/bin/env python3
+
+
+"""
+COMP3311
+23T1
+Assignment 2
+Pokemon Database
+
+Written by: Ezekiel Tay z5378748
+Written on: 5/4/2023
+
+Possible Evolutions
+
+Given the name of a pokemon,
+display a list of all the pokemon that could evolve into the given pokemon,
+and a list of all the pokemon that the given pokemon could evolve into.
+"""
+
+
+import sys
+import psycopg2
+import helpers
+
+
+### Constants
+USAGE = f"Usage: {sys.argv[0]} <Pokemon Name>"
+
+
+### Globals
+db = None
+Pokemon_Name = None
+
+
+### Command-line args
+if len(sys.argv) != 2:
+    print(USAGE, file=sys.stderr)
+    sys.exit(1)
+Pokemon_Name = helpers.clean(sys.argv[1])
+
+# Add \t depending on situation
+def add_tabs(len_ev_id_list, len_requirements_list):
+    if len_requirements_list > 1:
+        print("\t",end = "")
+    if len_ev_id_list > 1:
+        print("\t",end = "")
+
+# Prints out the pre-evolutions and post-evolutions of the desired pokemon.
+def pokemon_evolution(search_entity, Pokemon_Name):
+    # Determine variables for the case pre-evolution and post-evolution
+    if search_entity == "ev_to":
+        stage = "pre-evolutions"
+        result = "evolve from"
+        found_entity = "ev_from"
+    else:
+        stage = "post-evolutions"
+        result = "evolve into"
+        found_entity = "ev_to"
+    cur = db.cursor()
+    
+    #Determine number of different possible evolution ways to the pokemon with the same name
+    possible_ev_query = f"""
+        select {found_entity}, ev_id, ev_inverted, r_id 
+        from possible_evolutions 
+        where {search_entity} ilike '{helpers.format_string_query_search(Pokemon_Name)}' 
+        order by ev_id, ev_inverted, r_id
+    """
+    tuples = helpers.run_query_fetchall(db, possible_ev_query)
+
+    #There are no possible evolutions. Exit function
+    if len(tuples) == 0:
+        print(f"'{Pokemon_Name}' doesn't have any {stage}.\n")
+        return
+
+    #There are some possible evolutions
+    ev_target_list = []
+    prev = ""
+    for tuple in tuples:
+        ev_target = tuple[0]
+        if ev_target != prev:
+            ev_target_list.append(ev_target)
+        prev = ev_target
+    max_len_target_list = len(ev_target_list) - 1
+
+    print(f"'{Pokemon_Name}' can {result}:")
+
+    # Determine the number of different evolution ID for each evolution with the same name
+    for ev_target in ev_target_list:
+        print(f"\t'{ev_target}' when the following requirements are satisfied:")
+
+        # Find all distinct evolution IDs belonging to the same pokemon's name
+        ev_id_query = f"""
+            select distinct ev_id 
+            from possible_evolutions 
+            where {found_entity} ilike '{helpers.format_string_query_search(ev_target)}'
+        """
+        distinct_ev_ids_list = helpers.run_query_fetchall(db, ev_id_query)
+
+        # Find the last entry in the list of possible evolutions
+        ev_id_query_last = f"""
+            select distinct ev_id 
+            from possible_evolutions 
+            where {found_entity} ilike '{helpers.format_string_query_search(ev_target)}' 
+            order by ev_id desc limit 1"""
+        last_entry = helpers.run_query_fetchone(db, ev_id_query_last)
+        ev_id_last_entry, = last_entry
+
+        # Loop through list of distinct evolution ID
+        for ev_id, in distinct_ev_ids_list:
+            ev_requirement_query = f"select ev_requirement, ev_inverted from possible_evolutions where ev_id = '{ev_id}'"
+            ev_requirements_list = helpers.run_query_fetchall(db, ev_requirement_query)
+            count = 0
+
+            # Loop through the list of requirements needed for each evolution ID
+            for assertion, ev_inverted in ev_requirements_list:
+                add_tabs(len(distinct_ev_ids_list), len(ev_requirements_list))
+                print("\t\t", end = "")
+
+                # Add NOT if inverted is True
+                if ev_inverted == True:
+                    print("NOT", end = " ")
+                print(f"{assertion}")
+                count += 1
+                
+                # Including AND if there are at least two requirements for evolution
+                if count < len(ev_requirements_list):
+                    add_tabs(len(distinct_ev_ids_list), 0)
+                    print("\t\tAND")
+                
+            #Including OR if needed if there are more than one way to attain this evolution
+            if ev_id_last_entry != ev_id:
+                print("\t\tOR")
+            else:
+                print()
+
+def main():
+    # Check if pokemon exists in database
+    check_pokemon_exist_query = f"select * from pokemon where name ilike '{helpers.format_string_query_search(Pokemon_Name)}'"
+    pokemon_list = helpers.run_query_fetchone(db, check_pokemon_exist_query)
+    if pokemon_list == None:
+        print(f"'{Pokemon_Name}' isn't a Pokemon that exists.", file=sys.stderr)
+        return
+    
+    # Find pokemons it can evolve from
+    search_entity = "ev_to"
+    pokemon_evolution(search_entity, Pokemon_Name)
+    search_entity = "ev_from"
+    pokemon_evolution(search_entity, Pokemon_Name)
+
+
+if __name__ == '__main__':
+    try:
+        db = psycopg2.connect(dbname="ass2")
+        main()
+    except psycopg2.Error as err:
+        print("DB error: ", err)
+    except Exception as err:
+        print("Internal Error: ", err)
+        raise err
+    finally:
+        if db is not None:
+            db.close()
+    sys.exit(0)

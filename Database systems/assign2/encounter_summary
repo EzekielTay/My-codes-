@@ -1,0 +1,222 @@
+#! /usr/bin/env python3
+
+
+"""
+COMP3311
+23T1
+Assignment 2
+Pokemon Database
+
+Written by: Ezekiel Tay z5378748
+Written on: 8/4/2023
+
+Encounter Summary
+
+Print a summary of all the Pokemon that can be encountered at a given location in a given game
+"""
+
+
+import sys
+import psycopg2
+import helpers
+
+
+
+### Constants
+USAGE = f"Usage: {sys.argv[0]} <Location> <Game>"
+
+
+### Globals
+db = None
+Location = None
+Game = None
+
+
+### Command-line args
+if len(sys.argv) != 3:
+    print(USAGE, file=sys.stderr)
+    sys.exit(1)
+Location = helpers.clean(sys.argv[1])
+Game     = helpers.clean(sys.argv[2])
+
+#Class
+class class_pokemon:
+    def __init__(self, name, first_type, second_type, rarity, min_level, max_level, egg_groups, abilities, e_requirements):
+        self.name = name    
+        self.first_type = first_type
+        self.second_type = second_type
+        self.rarity = rarity
+        self.min_level = min_level
+        self.max_level = max_level
+        self.egg_groups = egg_groups
+        self.abilities = abilities
+        self.e_requirements = e_requirements
+
+# Display a list with multiple elements. Egg groups and abilities
+def display_multiple_list_elements(list, string):
+    if list == None:
+        return
+    print(string, end = "")
+    for element in list:
+        print(element, end = "")
+        if element != list[len(list) - 1]:
+            print(",", end = " ")
+        else:
+            print()
+
+def main():
+    cur = db.cursor
+    format_location = helpers.format_string_query_search(Location)
+    format_game = helpers.format_string_query_search(Game)
+
+    # Check for valid location in database
+    check_valid_location_query = f"select distinct name from locations"
+    valid_location_tuples = helpers.run_query_fetchall(db, check_valid_location_query)
+    valid_location_flag = helpers.check_valid_flag(valid_location_tuples, Location)
+    if valid_location_flag == False:
+        print(f"'{Location}' isn't a location in the Pokemon series.", file=sys.stderr)
+        return
+    
+    # Check for valid game in database
+    check_valid_game_query = f"select name from games where name = '{format_game}'"
+    valid_game_tuples = helpers.run_query_fetchall(db, check_valid_game_query)
+    valid_game_flag = helpers.check_valid_flag(valid_game_tuples, Game)
+    if valid_game_flag == False:
+        print(f"'Pokemon {Game}' isn't a game in the Pokemon series.", file=sys.stderr)
+        return
+    
+    # Check for valid location in the given game
+    check_location_exist_in_game_query = f"""
+        select l.name
+        from Games g
+            JOIN Locations l on (g.ID = l.Appears_In)
+        where g.name ilike '{format_game}' and l.name ilike '{format_location}'
+    """
+    valid_location_in_game_tuples = helpers.run_query_fetchone(db, check_location_exist_in_game_query)
+    if valid_location_in_game_tuples == None:
+        print(f"'{Location}' isn't in 'Pokemon {Game}'.", file=sys.stderr)
+        return
+
+    # For valid locations and game
+    # Get all possible pokemon encounters and details of the encounter
+    pokemon_encounters_query = f""" 
+        select p_name, p_rarity, p_levels, e_id 
+        from pokemon_encounter 
+        where g_name ilike '{format_game}' and l_name ilike '{format_location}' 
+        group by p_name, p_rarity, p_levels, e_id 
+    """
+    pokemon_encounters_tuples= helpers.run_query_fetchall(db, pokemon_encounters_query)
+
+    # Get all requirements of the pokemon encounters
+    encounter_requirements_query = f""" 
+        select e_id, p_name, e_requirements, e_inverted
+        from pokemon_encounter 
+        where g_name ilike '{format_game}' and l_name ilike '{format_location}' 
+        order by e_requirements
+    """
+    encounter_requirements_tuples = helpers.run_query_fetchall(db, encounter_requirements_query)    
+    
+    # Get Pokemon encounter type
+    pokemon_type_query = f"""
+        select p_name, p_first_type, p_second_type 
+        from pokemon_egg_group 
+        where g_name ilike '{format_game}' and l_name ilike '{format_location}' 
+        group by p_name, p_first_type, p_second_type 
+    """
+    pokemon_type_list = helpers.run_query_fetchall(db, pokemon_type_query)
+
+    # Get Pokemon encounter egg_groups
+    pokemon_egg_group_query = f"""
+        select p_name, p_group 
+        from pokemon_egg_group 
+        where g_name ilike '{format_game}' and l_name ilike '{format_location}'
+        group by p_name, p_group
+        order by p_group
+    """
+    pokemon_egg_group_list = helpers.run_query_fetchall(db, pokemon_egg_group_query)
+
+    # Get Pokemon encounter abilities
+    pokemon_abilities_query = f"""
+        select p_name, p_abilities, p_hidden 
+        from pokemon_abilities 
+        where g_name ilike '{format_game}' and l_name ilike '{format_location}' 
+        group by p_name, p_abilities, p_hidden 
+        order by p_abilities
+    """
+    pokemon_abilities_list = helpers.run_query_fetchall(db, pokemon_abilities_query)
+
+    print(f"In 'Pokemon {Game}' at '{Location}' the following Pokemon can be Encountered:")
+
+    list_of_valid_pokemons = []
+    # Loop through list of distinct encounter ID
+    for pokemon, rarity, levels, encounter_id in pokemon_encounters_tuples:
+        encounter_requirements_list = []
+        pokemon_rarity = rarity
+        min, max = levels.split(",")
+        min = min.split("(")[1]
+        max = max.split(")")[0]
+
+        # Loop through encounter requirements for each encounter ID
+        for e_id, name, e_requirement, e_inverted in encounter_requirements_tuples:
+            if e_id == encounter_id:
+                if e_inverted == True:
+                    e_requirement = "NOT " + e_requirement
+                encounter_requirements_list.append(e_requirement)
+
+        # Find the Pokemon that is in the encounter
+        for name, first_type, second_type in  pokemon_type_list:
+            if name == pokemon:
+                pokemon_first_type = first_type
+                pokemon_second_type = second_type
+        
+        # Find the Egg groups of the pokemon in the encounter
+        egg_groups_list = []
+        for name, egg_group in pokemon_egg_group_list:
+            if name == pokemon:
+                egg_groups_list.append(egg_group)
+
+        # Find the abilities of the pokemon in that encounter
+        ability_list = []
+        for name, ability, hidden in pokemon_abilities_list:
+            # Ignore hidden abilities
+            if name == pokemon and hidden == False:
+                ability_list.append(ability)
+
+        # append the pokemon to the list of class_pokemons
+        list_of_valid_pokemons.append(class_pokemon(pokemon, pokemon_first_type, pokemon_second_type, pokemon_rarity, 
+                                                    min, max, egg_groups_list, ability_list, encounter_requirements_list))
+
+    # Sort list of valid pokemons by rarity, then name, then max_level, then requirements
+    list_of_valid_pokemons.sort(key = lambda x: (- x.rarity, x.name, int(x.max_level), x.e_requirements))
+    
+    # Print the desired output
+    for valid_pokemon in list_of_valid_pokemons:
+        print()
+        print(f"\t{valid_pokemon.name}:")
+        print(f"\t\tType: {valid_pokemon.first_type}", end = "")
+        if valid_pokemon.second_type != None:
+            print(f"/{valid_pokemon.second_type}")
+        else:
+            print()
+        print(f"\t\tRarity: {valid_pokemon.rarity}%")
+        print(f"\t\tLevels: min {valid_pokemon.min_level}, max {valid_pokemon.max_level}")
+        display_multiple_list_elements(valid_pokemon.egg_groups, "\t\tEgg Groups: ")
+        display_multiple_list_elements(valid_pokemon.abilities, "\t\tAbilities: ")
+        print("\t\tEncounter Requirements:")
+        for requirement in valid_pokemon.e_requirements:
+            print(f"\t\t\t{requirement}")    
+        
+
+if __name__ == '__main__':
+    try:
+        db = psycopg2.connect(dbname="ass2")
+        main()
+    except psycopg2.Error as err:
+        print("DB error: ", err)
+    except Exception as err:
+        print("Internal Error: ", err)
+        raise err
+    finally:
+        if db is not None:
+            db.close()
+    sys.exit(0)

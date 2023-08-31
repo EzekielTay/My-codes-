@@ -1,0 +1,243 @@
+#! /usr/bin/env python3
+
+
+"""
+COMP3311
+23T1
+Assignment 2
+Pokemon Database
+
+Written by: Ezekiel Tay z5378748
+Written on: 10/4/2023
+
+Attack Damage
+
+Given the name of an attacking, and a defending pokemon along with the name of a game in the Pokemon series,
+display a list, ordered from lowest to highest damage,
+of all the moves the attacking pokemon could use on the defending pokemon in the given game.
+"""
+
+import sys
+import psycopg2
+import helpers
+import math
+
+
+### Constants
+USAGE = f"Usage: {sys.argv[0]} <Attacking Pokemon Name> <Defending Pokemon Name> <Pokemon Game Name>"
+PHYSICAL_ATK = 1
+PHYSICAL_DEF = 2
+SPECIAL_ATK = 3
+SPECIAL_DEF = 4
+
+### Globals
+db = None
+Attacking_Pokemon_Name = None
+Defending_Pokemon_Name = None
+Pokemon_Game_Name      = None
+
+
+### Command-line args
+if len(sys.argv) != 4:
+    print(USAGE, file=sys.stderr)
+    sys.exit(1)
+Attacking_Pokemon_Name = helpers.clean(sys.argv[1])
+Defending_Pokemon_Name = helpers.clean(sys.argv[2])
+Pokemon_Game_Name      = helpers.clean(sys.argv[3])
+
+# Class
+class class_pokemon:
+    def __init__(self, name, first_type, second_type, physical, special):
+        self.name = name
+        self.first_type = first_type
+        self.second_type = second_type
+        self.physical = physical
+        self.special = special
+
+class class_battle:
+    def __init__(self, attacker_name, defender_name, min_dmg, max_dmg, move):
+        self.attacker_name = attacker_name
+        self.defender_name = defender_name
+        self.min_dmg = min_dmg
+        self.max_dmg = max_dmg
+        self.move = move
+
+# Taking in atk/def, pokemon name and a list of tuples,
+# Return a class_pokemon containing a pokemon's name, types, physical and special stats
+def target_pokemon(position, pokemon_name, pokemon_tuples):
+    for name, first_type, second_type, base_stats in pokemon_tuples:
+        if name == pokemon_name:
+            base_stats = base_stats.split(",")
+            # Attack pokemon
+            if position == "attack":
+                phyical = base_stats[PHYSICAL_ATK]
+                special = base_stats[SPECIAL_ATK]
+            # Defending pokemon
+            else:
+                phyical = base_stats[PHYSICAL_DEF]
+                special = base_stats[SPECIAL_DEF]
+            return class_pokemon(name, first_type, second_type, phyical, special)
+
+# determine attack level
+def determine_attacker_level(status):
+    if status == "min":
+        return 1
+    else:
+        return 100
+
+# Determine to use special or physical stats for attacker and defender.
+def determine_special_or_physical(pokemon, move_category):
+    if move_category == "Physical":
+        return int(pokemon.physical)
+    # Return special
+    else:
+        return int(pokemon.special)
+
+# Determine Random Factor
+def determine_random_factor(status):
+    if status == "min":
+        return 0.85
+    else:
+        return 1.00
+
+# Determine Stab value
+def determine_stab_value(attacker_pokemon, move_type):
+    # Same type
+    if move_type == attacker_pokemon.first_type or  move_type == attacker_pokemon.second_type:
+        return 1.5
+    # different types
+    else:
+        return 1.0
+
+# Determine type effectiveness multiplier
+def determine_effectiveness_multiplier(defender_pokemon, move_type, type_effectiveness_tuples):
+    multiplier = 1
+    for attack_type, defend_type, effect in type_effectiveness_tuples:
+        if move_type == attack_type and defend_type == defender_pokemon.first_type:
+            multiplier = multiplier * effect / 100
+        if move_type == attack_type and defend_type == defender_pokemon.second_type:
+            multiplier = multiplier * effect / 100
+    return multiplier
+
+# calculate damage formula
+def calculate_damage(status, attacker_pokemon, defender_pokemon, move_power, 
+                     move_category, move_type, type_effectiveness_tuples):
+    attacker_level = determine_attacker_level(status)
+    attack_power = move_power
+    attacker_attack = determine_special_or_physical(attacker_pokemon, move_category)
+    defender_defense = determine_special_or_physical(defender_pokemon, move_category)
+    random_factor = determine_random_factor(status)
+    stab = determine_stab_value(attacker_pokemon, move_type)
+    type_effectiveness = determine_effectiveness_multiplier(defender_pokemon, move_type, type_effectiveness_tuples)
+    damage = ((((((2 * attacker_level) / 5) + 2) * attack_power * (attacker_attack / defender_defense)) / 50) + 2) * random_factor * stab * type_effectiveness
+    return math.trunc(round(damage, 1))
+
+def main():
+    cur = db.cursor()
+    format_game_name = helpers.format_string_query_search(Pokemon_Game_Name)
+
+    # Check if Pokemon exists in database
+    valid_pokemon_query = "select distinct name from pokemon"
+    valid_pokemon_tuples = helpers.run_query_fetchall(db, valid_pokemon_query)
+    first_pokemon_valid = helpers.check_valid_flag(valid_pokemon_tuples, Attacking_Pokemon_Name)
+    second_pokemon_valid = helpers.check_valid_flag(valid_pokemon_tuples, Defending_Pokemon_Name)
+    if first_pokemon_valid == False:
+        print(f"'{Attacking_Pokemon_Name}' isn't a Pokemon that exists.", file=sys.stderr)
+        return
+    if second_pokemon_valid == False:
+        print(f"'{Defending_Pokemon_Name}' isn't a Pokemon that exists.", file=sys.stderr)
+        return
+    
+    # Check if game exist in pokemon series
+    valid_game_query = f"select distinct name from games where name iLIKE '{format_game_name}'"
+    valid_pokemon_tuples = helpers.run_query_fetchone(db, valid_game_query)
+    if valid_pokemon_tuples == None:
+        print(f"'Pokemon {Pokemon_Game_Name}' isn't a game in the Pokemon series.", file=sys.stderr)
+        return
+    
+    # Check if pokemon exist in Game
+    check_pokemon_exist_in_game_query = f"select p_name from q5_pokemon_in_game where g_name ilike '{format_game_name}'"
+    check_pokemon_exist_tuples = helpers.run_query_fetchall(db, check_pokemon_exist_in_game_query)
+    first_pokemon_valid = helpers.check_valid_flag(check_pokemon_exist_tuples, Attacking_Pokemon_Name)
+    second_pokemon_valid = helpers.check_valid_flag(check_pokemon_exist_tuples, Defending_Pokemon_Name)
+    if first_pokemon_valid == False:
+        print(f"'{Attacking_Pokemon_Name}' doesn't appear in 'Pokemon {Pokemon_Game_Name}'.", file=sys.stderr)
+        return
+    if second_pokemon_valid == False:
+        print(f"'{Defending_Pokemon_Name}' doesn't appear in 'Pokemon {Pokemon_Game_Name}'", file=sys.stderr)
+        return
+
+    # Get Pokemons that exist in given game
+    pokemon_in_game_query = f"""
+        select p_name, p_first_type, p_second_type, p_base_stats 
+        from q5_pokemon_in_game
+        where g_name ilike '{format_game_name}'
+        group by p_name, p_first_type, p_second_type, p_base_stats
+    """
+    pokemon_in_game_tuples = helpers.run_query_fetchall(db, pokemon_in_game_query)
+
+    # Set class_pokemons attacker and defender
+    atk_pokemon = target_pokemon("attack", Attacking_Pokemon_Name, pokemon_in_game_tuples)
+    def_pokemon = target_pokemon("defend", Defending_Pokemon_Name, pokemon_in_game_tuples)
+
+    # Find the list of valid moves by the attacker
+    pokemon_moves_query = f"""
+        select p_name, m_name, m_type, m_category, m_power
+        from q5_pokemon_moves
+        where g_name ilike '{format_game_name}'
+        group by p_name, m_name, m_type, m_category, m_power
+    """
+    pokemon_moves_tuples = helpers.run_query_fetchall(db, pokemon_moves_query)
+
+    # Get the type_effectiveness list
+    type_effectiveness_query = "select * from Type_Effectiveness"
+    type_effectiveness_tuples = helpers.run_query_fetchall(db, type_effectiveness_query)
+
+    battle_list = []
+    for p_name, m_name, m_type, m_category, m_power in pokemon_moves_tuples:
+        if p_name == Attacking_Pokemon_Name:
+            # Calculate the min and max damage of each move
+            min_dmg = calculate_damage("min", atk_pokemon, def_pokemon, m_power, m_category, m_type, type_effectiveness_tuples)
+            max_dmg = calculate_damage("max", atk_pokemon, def_pokemon, m_power, m_category, m_type, type_effectiveness_tuples)
+            if min_dmg != 0 and max_dmg != 0:
+                battle_list.append(class_battle(Attacking_Pokemon_Name, Defending_Pokemon_Name, min_dmg, max_dmg, m_name))
+    
+    # Sort the list of battles
+    battle_list.sort(key = lambda x: (x.max_dmg, x.min_dmg, x.move))
+
+    #Determine length of longest move
+    max_len_move = 0
+    max_len_min_dmg = 0
+    max_len_max_dmg = 0
+    for battle in battle_list:
+        battle.move = "'" + battle.move + "'"
+        if (len(battle.move) > max_len_move):
+            max_len_move = len(battle.move) + 1
+        if (len(str(battle.min_dmg)) > max_len_min_dmg):
+            max_len_min_dmg = len(str(battle.min_dmg)) + 1
+        if (len(str(battle.max_dmg)) > max_len_max_dmg):
+            max_len_max_dmg = len(str(battle.max_dmg)) + 1
+    
+    # If battle_list length is 0, the attacking pokemon can't attack the defending pokemon
+    if len(battle_list) == 0:
+        print(f"In 'Pokemon {Pokemon_Game_Name}', '{Attacking_Pokemon_Name}' can't attack '{Defending_Pokemon_Name}'.")
+        return
+
+    print(f"In 'Pokemon {Pokemon_Game_Name}', When '{Attacking_Pokemon_Name}' attacks '{Defending_Pokemon_Name}', '{Attacking_Pokemon_Name}' can use the following moves:")
+    print()
+    for battle in battle_list:
+        print(f"{battle.move:<{max_len_move}} for a minimum of {battle.min_dmg:>{max_len_min_dmg}} damage and a maximum of {battle.max_dmg:>{max_len_max_dmg}} damage to '{Defending_Pokemon_Name}'.")
+    
+if __name__ == '__main__':
+    try:
+        db = psycopg2.connect(dbname="ass2")
+        main()
+    except psycopg2.Error as err:
+        print("DB error: ", err)
+    except Exception as err:
+        print("Internal Error: ", err)
+        raise err
+    finally:
+        if db is not None:
+            db.close()
+    sys.exit(0)
