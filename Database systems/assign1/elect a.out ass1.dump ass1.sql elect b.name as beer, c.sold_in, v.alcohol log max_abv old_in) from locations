@@ -1,0 +1,94 @@
+ id  | code |        name        
+-----+------+--------------------
+   1 | AFG  | Afghanistan
+   2 | ALB  | Albania
+   4 | ARG  | Argentina
+   6 | AUS  | Australia
+   7 | AUT  | Austria
+  11 | BEL  | Belgium
+  12 | BOL  | Bolivia
+  14 | BRA  | Brazil
+  19 | CMR  | Cameroon
+  20 | CAN  | Canada
+  22 | CHL  | Chile
+  23 | CHN  | China
+  24 | COL  | Colombia
+  28 | HRV  | Croatia
+  29 | CUB  | Cuba
+  30 | CYP  | Cyprus
+  31 | CZE  | Czech Republic
+  32 | DNK  | Denmark
+  33 | ECU  | Ecuador
+  35 | ENG  | England
+  36 | EST  | Estonia
+  38 | FJI  | Fiji
+  39 | FIN  | Finland
+  40 | FRA  | France
+  43 | GEO  | Georgia
+  44 | DEU  | Germany
+  45 | GHA  | Ghana
+  47 | GRC  | Greece
+  48 | GRL  | Greenland
+  56 | HKG  | Hong Kong
+  57 | HUN  | Hungary
+  58 | ISL  | Iceland
+  59 | IND  | India
+  60 | IDN  | Indonesia
+  62 | IRL  | Ireland
+  63 | ISR  | Israel
+  64 | ITA  | Italy
+  65 | JPN  | Japan
+  66 | JOR  | Jordan
+  68 | KEN  | Kenya
+  69 | PRK  | North Korea
+  70 | KOR  | South Korea
+  71 | LVA  | Latvia
+  72 | LBN  | Lebanon
+  77 | LTU  | Lithuania
+  78 | LUX  | Luxembourg
+  82 | MYS  | Malaysia
+  83 | MLT  | Malta
+  84 | MUS  | Mauritius
+  85 | MEX  | Mexico
+  86 | MDA  | Moldova
+  87 | MCO  | Monaco
+  88 | MNG  | Mongolia
+  90 | MAR  | Morocco
+  96 | NLD  | Netherlands
+  97 | NCL  | New Caledonia
+  98 | NZL  | New Zealand
+ 101 | NGA  | Nigeria
+ 103 | NOR  | Norway
+ 106 | PNG  | Papua New Guinea
+ 107 | PRY  | Paraguay
+ 108 | PER  | Peru
+ 109 | PHL  | Philippines
+ 110 | POL  | Poland
+ 111 | PRT  | Portugal
+ 113 | ROU  | Romania
+ 114 | RUS  | Russian Federation
+ 119 | SRB  | Serbia
+ 121 | SCO  | Scotland
+ 123 | SGP  | Singapore
+ 124 | SVK  | Slovakia
+ 125 | SVN  | Slovenia
+ 128 | ZAF  | South Africa
+ 130 | ESP  | Spain
+ 131 | LKA  | Sri Lanka
+ 134 | SWE  | Sweden
+ 135 | CHE  | Switzerland
+ 137 | TWN  | Taiwan
+ 139 | THA  | Thailand
+ 143 | TUN  | Tunisia
+ 144 | TUR  | Turkey
+ 145 | TKM  | Turkmenistan
+ 148 | UKR  | Ukraine
+ 150 | USA  | United States
+ 151 | URY  | Uruguay
+ 154 | VEN  | Venezuela
+ 155 | VNM  | Vietnam
+ 156 | WAL  | Wales
+ 158 | ZMB  | Zambia
+ 159 | ZWE  | Zimbabwe
+(90 rows)
+
